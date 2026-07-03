@@ -57,3 +57,25 @@ def test_only_rejects_non_hex():
 def test_only_rejects_out_of_range_byte():
     with pytest.raises(SystemExit):
         parse_args(["1E:B7:E4", "--only", "1ff"])
+
+
+def test_save_and_name_resolution_defaults():
+    args = parse_args(["1E:B7:E4"])
+    assert args.save is None
+    assert args.no_resolve_names is False
+    assert args.name_timeout == 20
+
+
+def test_save_accepts_path():
+    args = parse_args(["1E:B7:E4", "--save", "found.tsv"])
+    assert args.save == "found.tsv"
+
+
+def test_no_resolve_names_flag():
+    args = parse_args(["1E:B7:E4", "--no-resolve-names"])
+    assert args.no_resolve_names is True
+
+
+def test_rejects_non_positive_name_timeout():
+    with pytest.raises(SystemExit):
+        parse_args(["1E:B7:E4", "--name-timeout", "0"])

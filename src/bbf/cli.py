@@ -1,18 +1,41 @@
 """Top-level orchestration: ties the optional ubertooth survey to the
-l2ping sweep and handles pageto save/restore around the run.
+l2ping sweep, resolves names for any address with a known UAP along the
+way, and handles pageto save/restore around the run.
 """
 import shutil
 import subprocess
 import sys
 
 from .args import parse_args
+from .log import append_result
+from .resolve import resolve_name
 from .survey import parse_survey_results, prompt_scan_timeout, run_ubertooth_scan, select_target
 from .sweep import get_pageto, probe_one, set_pageto
 
 
+def _resolve_and_log(addr, args, source):
+    """Resolve addr's name via hcitool (unless disabled), print it, and
+    append it to --save's file if one was given. `source` records how
+    the UAP became known ('survey' or 'sweep') for the log line. Returns
+    the resolved name, or None if resolution was skipped/unsuccessful."""
+    if args.no_resolve_names:
+        return None
+    name = resolve_name(addr, hcidev=args.hcidev, timeout=args.name_timeout)
+    print(f"  [{source}] {addr} -> {name if name else '(no name response)'}")
+    if args.save:
+        append_result(args.save, addr, name, source)
+    return name
+
+
 def _resolve_target_via_survey(args):
     """No LAP given on the CLI -- interactively survey for one. Mutates
-    args.known_octets in place, or exits the process if the user bails."""
+    args.known_octets in place, or exits the process if the user bails.
+
+    Every survey pass that turns up 'ready to use' (UAP already
+    resolved) candidates gets those names resolved and logged
+    immediately, regardless of which candidate (if any) the user goes
+    on to pick for brute-forcing -- they're already complete addresses
+    modulo the assumed NAP, so there's no reason to wait."""
     if shutil.which("ubertooth-rx") is None:
         sys.exit("No known_octets given and ubertooth-rx not found on PATH "
                   "(try: sudo apt install ubertooth).")
@@ -23,6 +46,13 @@ def _resolve_target_via_survey(args):
 
             output = run_ubertooth_scan(timeout)
             needs_bf, ready = parse_survey_results(output)
+
+            if ready and not args.no_resolve_names:
+                print(f"\nResolving names for {len(ready)} known-UAP address(es) from the survey...")
+                for uap, lap in ready:
+                    addr = f"{args.prefix}:{uap}:{lap}"
+                    _resolve_and_log(addr, args, source="survey")
+
             target = select_target(needs_bf, ready, args.prefix)
             if target is not None:
                 args.known_octets = target
@@ -38,19 +68,26 @@ def _resolve_target_via_survey(args):
 def main(argv=None):
     args = parse_args(argv)
 
-    if args.known_octets is None:
-        _resolve_target_via_survey(args)
-
+    # Checked and authenticated up front, before the (possibly interactive,
+    # possibly repeated) survey step -- that step now also resolves names
+    # for any 'ready to use' hit it finds, so it needs hcitool+sudo just as
+    # much as the sweep below does.
     if shutil.which("l2ping") is None:
         sys.exit("l2ping not found on PATH (try: sudo apt install bluez-hcidump / bluez)")
+    if not args.no_resolve_names and shutil.which("hcitool") is None:
+        sys.exit("hcitool not found on PATH (try: sudo apt install bluez), "
+                  "or pass --no-resolve-names to skip name resolution.")
 
-    # Pre-authenticate sudo *before* the loop starts. Otherwise "sudo
-    # l2ping" prompts for a password on stderr, which is captured/hidden
-    # by subprocess -> the first probe just silently hangs until you
-    # notice nothing is happening.
+    # Pre-authenticate sudo *before* anything else runs. Otherwise "sudo
+    # l2ping"/"sudo hcitool" prompts for a password on stderr, which is
+    # captured/hidden by subprocess -> the first probe just silently hangs
+    # until you notice nothing is happening.
     print("Caching sudo credentials (you may be prompted for your password)...")
     if subprocess.run(["sudo", "-v"]).returncode != 0:
         sys.exit("sudo authentication failed")
+
+    if args.known_octets is None:
+        _resolve_target_via_survey(args)
 
     orig_pageto = None
     if not args.no_pageto_override:
@@ -119,6 +156,7 @@ def main(argv=None):
 
     if found_addr is not None:
         print(f"\nFound device at: {found_addr}")
+        _resolve_and_log(found_addr, args, source="sweep")
         sys.exit(0)
     else:
         print("\nNot found")

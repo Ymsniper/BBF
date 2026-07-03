@@ -53,6 +53,24 @@ def parse_args(argv=None):
              f"(default: {DEFAULT_SCAN_TIME}, prompted interactively if not given "
              f"here). Only used when known_octets is omitted.",
     )
+    p.add_argument(
+        "--save", metavar="FILE", default=None,
+        help="append 'timestamp<TAB>address<TAB>name<TAB>source' to FILE for every "
+             "address with a known UAP as it's resolved -- both survey 'ready to "
+             "use' hits and whatever the sweep finds live. Creates FILE if it "
+             "doesn't exist; never truncates it, so repeated runs accumulate.",
+    )
+    p.add_argument(
+        "--no-resolve-names", action="store_true",
+        help="skip running `hcitool name` against known-UAP addresses; just report "
+             "the addresses themselves (matches old behavior).",
+    )
+    p.add_argument(
+        "--name-timeout", type=int, default=20,
+        help="subprocess-level timeout in seconds for each hcitool name call "
+             "(default: 20). Independent safety valve on top of --pageto, since "
+             "hcitool has no --pageto concept of its own.",
+    )
     args = p.parse_args(argv)
 
     if args.known_octets is not None and not OCTET3_RE.match(args.known_octets):
@@ -63,6 +81,8 @@ def parse_args(argv=None):
         p.error("--retries must be >= 0")
     if args.scan_time is not None and args.scan_time <= 0:
         p.error("--scan-time must be > 0")
+    if args.name_timeout <= 0:
+        p.error("--name-timeout must be > 0")
     if args.only is not None:
         try:
             args.only = [int(b, 16) for b in args.only.split(",")]

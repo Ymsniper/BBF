@@ -199,7 +199,7 @@ pytest
 
 # CREDITS
 
-[@kovmir](https://github.com/kovmir) for l2flood
+[@kovmir](https://github.com/kovmir) for l2flood and 
 [@Great Scott Gadgets](https://github.com/greatscottgadgets) for ubertooth
 
 

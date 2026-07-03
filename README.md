@@ -72,8 +72,6 @@ mode, which some people rely on for privacy. Locating or fingerprinting
 someone else's device without consent may be illegal in your
 jurisdiction and is not the intended use of this tool.
 
-most Bluetooth devices are paired and set to non-discoverable, since general discovery scans are what most people/OSes turn off after initial setup, but non-discoverable only blocks scanning, not connections. L2CAP is connection-oriented and has no discovery mechanism of its own; l2ping/l2flood both call connect() directly and need only the LAP+UAP (NAP not needed, exact full BD_ADDR not needed) which what bbf + ubertooth does Therefore bbf makes flood tools more dangerous against real targets.
-
 ## Requirements
 
 - Linux with BlueZ (`l2ping`, `hciconfig`) — `sudo apt install bluez`

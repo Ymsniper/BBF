@@ -1,0 +1,2 @@
+[console_scripts]
+bbf = bbf.cli:main

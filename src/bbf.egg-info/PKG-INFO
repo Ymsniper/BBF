@@ -2,7 +2,7 @@ Metadata-Version: 2.4
 Name: bbf
 Version: 0.1.0
 Summary: Brute-force one unknown BD_ADDR octet (the UAP) via l2ping, with an optional ubertooth-rx survey front-end.
-Author: Your Name
+Author: Ymsniper 
 License: MIT
 Keywords: bluetooth,bd_addr,l2ping,ubertooth,security-research
 Classifier: Programming Language :: Python :: 3

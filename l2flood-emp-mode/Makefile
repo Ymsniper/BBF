@@ -5,12 +5,13 @@ PREFIX ?= /usr/local
 project = l2flood
 
 LDFLAGS = -lbluetooth
+CFLAGS ?= -no-pie -fno-pie
 
 parallel:
-	$(CC) $(project).c -fopenmp $(LDFLAGS) -o $(project)
+	$(CC) $(CFLAGS) $(project).c -fopenmp $(LDFLAGS) -o $(project)
 
 serial:
-	$(CC) $(project).c $(LDFLAGS) -o $(project)
+	$(CC) $(CFLAGS) $(project).c $(LDFLAGS) -o $(project)
 
 clean:
 	rm -f ./$(project)

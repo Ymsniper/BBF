@@ -27,6 +27,7 @@
 #include <config.h>
 #endif
 
+#include <ctype.h>
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
@@ -78,11 +79,107 @@ static float tv2fl(struct timeval tv)
 	return (float)(tv.tv_sec*1000.0) + (float)(tv.tv_usec/1000.0);
 }
 
-static void stat(int sig)
+static void sigint_handler(int sig)
 {
 	int loss = sent_pkt ? (float)((sent_pkt-recv_pkt)/(sent_pkt/100.0)) : 0;
 	printf("%d sent, %d received, %d%% loss\n", sent_pkt, recv_pkt, loss);
 	exit(0);
+}
+
+/*
+ * Validate a BD_ADDR string: must be exactly XX:XX:XX:XX:XX:XX
+ * where X is a hex digit. Returns 1 if valid, 0 if not.
+ */
+static int valid_bdaddr(const char *s)
+{
+	int i;
+
+	if (!s || strlen(s) != 17)
+		return 0;
+
+	for (i = 0; i < 17; i++) {
+		if ((i + 1) % 3 == 0) {
+			if (s[i] != ':')
+				return 0;
+		} else {
+			if (!isxdigit((unsigned char)s[i]))
+				return 0;
+		}
+	}
+	return 1;
+}
+
+/*
+ * Parse a positive integer from a string. Returns -1 on failure
+ * (empty string, non-numeric characters, overflow).
+ */
+static long parse_positive_int(const char *s, const char *name)
+{
+	char *end;
+	long val;
+
+	if (!s || !*s) {
+		fprintf(stderr, "Error: -%s requires a numeric argument\n", name);
+		return -1;
+	}
+
+	val = strtol(s, &end, 10);
+	if (*end != '\0') {
+		fprintf(stderr, "Error: -%s value '%s' is not a valid number\n", name, s);
+		return -1;
+	}
+	if (val < 0) {
+		fprintf(stderr, "Error: -%s value must not be negative\n", name);
+		return -1;
+	}
+
+	return val;
+}
+
+static void usage(void)
+{
+#ifdef _OPENMP
+	printf("l2flood - L2CAP flood (OpenMP parallel build)\n\n");
+	printf("Usage:\n");
+	printf("  l2flood [options] <bdaddr>\n\n");
+#else
+	printf("l2flood - L2CAP flood (serial build)\n\n");
+	printf("Usage:\n");
+	printf("  l2flood [options] <bdaddr>\n\n");
+#endif
+	printf("Arguments:\n");
+	printf("  <bdaddr>       Target Bluetooth address (XX:XX:XX:XX:XX:XX)\n\n");
+	printf("Options:\n");
+	printf("  -i <device>    HCI adapter: 'hci0', 'hci1', etc. (default: any)\n");
+	printf("  -s <bytes>     L2CAP echo payload size (default: %d)\n",
+#ifdef _OPENMP
+		600
+#else
+		44
+#endif
+	);
+	printf("  -c <count>     Number of packets to send, -1 for infinite (default: -1)\n");
+	printf("  -t <seconds>   Response timeout per packet (default: 10)\n");
+	printf("  -d <seconds>   Delay between packets (default: %d)\n",
+#ifdef _OPENMP
+		0
+#else
+		1
+#endif
+	);
+	printf("  -f             Flood mode: set delay to 0\n");
+	printf("  -r             Reverse: send echo responses instead of requests\n");
+	printf("  -v             Verify response payload matches request\n");
+#ifdef _OPENMP
+	printf("  -n <threads>   Number of parallel threads (default: number of CPUs)\n");
+	printf("  -R             EMP mode: fire-and-forget burst-reconnect cycling\n");
+#endif
+	printf("\nExamples:\n");
+	printf("  l2flood -i hci1 AA:BB:CC:DD:EE:FF\n");
+	printf("  l2flood -i hci0 -s 600 -c 1000 AA:BB:CC:DD:EE:FF\n");
+#ifdef _OPENMP
+	printf("  l2flood -i hci1 -R AA:BB:CC:DD:EE:FF\n");
+#endif
 }
 
 /* ------------------------------------------------------------
@@ -100,7 +197,7 @@ static void ping_normal(char *svr)
 	uint8_t id;
 
 	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = stat;
+	sa.sa_handler = sigint_handler;
 	sigaction(SIGINT, &sa, NULL);
 
 	send_buf = malloc(L2CAP_CMD_HDR_SIZE + size);
@@ -277,7 +374,7 @@ static void ping_normal(char *svr)
 		if (++id > 254)
 			id = ident;
 	}
-	stat(0);
+	sigint_handler(0);
 	free(send_buf);
 	free(recv_buf);
 	return;
@@ -326,11 +423,13 @@ static void ping_emp(char *svr)
 	int sk = -1;
 	int i, printed = 0;
 	int reuse = 1;
+	int connect_fails = 0;
+	int last_err = 0;
 	struct linger ling = {1, 0};
 	struct sockaddr_l2 addr;
 
 	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = stat;
+	sa.sa_handler = sigint_handler;
 	sigaction(SIGINT, &sa, NULL);
 
 	send_buf = malloc(L2CAP_CMD_HDR_SIZE + size);
@@ -394,11 +493,29 @@ static void ping_emp(char *svr)
 						int err = 0;
 						socklen_t elen = sizeof(err);
 						getsockopt(sk, SOL_SOCKET, SO_ERROR, &err, &elen);
-						if (err != 0) { close(sk); sk = -1; usleep(2000); continue; }
+						if (err != 0) {
+							if (err != last_err || connect_fails % 50 == 0) {
+								fprintf(stderr, "EMP connect: %s (attempt %d)\n",
+									strerror(err), connect_fails + 1);
+								last_err = err;
+							}
+							connect_fails++;
+							close(sk); sk = -1; usleep(2000); continue;
+						}
 					} else {
+						connect_fails++;
+						if (connect_fails % 50 == 0)
+							fprintf(stderr, "EMP connect: poll timeout (attempt %d)\n",
+								connect_fails);
 						close(sk); sk = -1; usleep(2000); continue;
 					}
 				} else {
+					if (errno != last_err || connect_fails % 50 == 0) {
+						fprintf(stderr, "EMP connect: %s (attempt %d)\n",
+							strerror(errno), connect_fails + 1);
+						last_err = errno;
+					}
+					connect_fails++;
 					close(sk); sk = -1; usleep(2000); continue;
 				}
 			}
@@ -415,6 +532,13 @@ static void ping_emp(char *svr)
 			{
 				struct timeval snd_tv = {0, 300000}; /* 300ms */
 				setsockopt(sk, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
+			}
+
+			if (connect_fails > 0) {
+				printf("EMP reconnected after %d failed attempt(s)\n",
+					   connect_fails);
+				connect_fails = 0;
+				last_err = 0;
 			}
 
 			if (!printed) {
@@ -462,7 +586,7 @@ static void ping_emp(char *svr)
 	}
 
 	free(send_buf);
-	stat(0);
+	sigint_handler(0);
 }
 #endif /* _OPENMP */
 
@@ -477,59 +601,74 @@ static void ping(char *svr)
 		ping_normal(svr);
 }
 
-static void usage(void)
-{
-#ifdef _OPENMP
-	printf("l2flood - L2CAP flood\n");
-#else
-	printf("l2ping - L2CAP ping\n");
-#endif
-	printf("Usage:\n");
-#ifdef _OPENMP
-	printf("\tl2flood [-i device] [-s size] [-c count] [-t timeout] [-d delay] [-n threads] [-R] [-f] [-r] [-v] <bdaddr>\n");
-	printf("\t-f  Flood ping (delay = 0); default\n");
-#else
-	printf("\tl2ping [-i device] [-s size] [-c count] [-t timeout] [-d delay] [-f] [-r] [-v] <bdaddr>\n");
-	printf("\t-f  Flood ping (delay = 0)\n");
-#endif
-	printf("\t-r  Reverse ping\n");
-	printf("\t-v  Verify request and response payload\n");
-#ifdef _OPENMP
-	printf("\t-R  EMP MODE: fire-and-forget, no response waiting, instant reconnect, never exits\n");
-#endif
-}
-
 int main(int argc, char *argv[])
 {
-	int opt;
+	int i;
+	long val;
+	char *target = NULL;
+
+	if (argc < 2) {
+		usage();
+		exit(1);
+	}
 
 	/* Default options */
 	bacpy(&bdaddr, BDADDR_ANY);
 #ifdef _OPENMP
 	threads = sysconf(_SC_NPROCESSORS_ONLN);
-	while ((opt=getopt(argc,argv,"i:d:s:c:t:n:Rfrv")) != EOF) {
-#else
-	while ((opt=getopt(argc,argv,"i:d:s:c:t:frv")) != EOF) {
+	if (threads < 1) threads = 1;
 #endif
-		switch(opt) {
+
+	/* Manual argument parsing to avoid GNU getopt permutation issues.
+	 * Scan argv once: flags with arguments consume the next element,
+	 * bare flags are handled inline, anything else is the target. */
+	for (i = 1; i < argc; i++) {
+		if (argv[i][0] != '-') {
+			/* Positional argument: target BD_ADDR */
+			if (target) {
+				fprintf(stderr, "Error: unexpected extra argument '%s'\n", argv[i]);
+				fprintf(stderr, "       (use -i to specify the HCI adapter)\n\n");
+				usage();
+				exit(1);
+			}
+			target = argv[i];
+			continue;
+		}
+
+		/* Single-character flags, possibly combined (-rv) */
+		if (strlen(argv[i]) < 2) {
+			fprintf(stderr, "Error: bare '-' is not a valid option\n");
+			usage();
+			exit(1);
+		}
+
+		switch (argv[i][1]) {
 		case 'i':
-			if (!strncasecmp(optarg, "hci", 3))
-				hci_devba(atoi(optarg + 3), &bdaddr);
+			if (++i >= argc) {
+				fprintf(stderr, "Error: -i requires an argument\n");
+				exit(1);
+			}
+			if (!strncasecmp(argv[i], "hci", 3))
+				hci_devba(atoi(argv[i] + 3), &bdaddr);
 			else
-				str2ba(optarg, &bdaddr);
+				str2ba(argv[i], &bdaddr);
 			break;
 
 		case 'd':
-			delay = atoi(optarg);
+			if (++i >= argc) {
+				fprintf(stderr, "Error: -d requires an argument\n");
+				exit(1);
+			}
+			val = parse_positive_int(argv[i], "d");
+			if (val < 0) exit(1);
+			delay = (int)val;
 			break;
 
 		case 'f':
-			/* Kinda flood ping */
 			delay = 0;
 			break;
 
 		case 'r':
-			/* Use responses instead of requests */
 			reverse = 1;
 			break;
 
@@ -538,15 +677,43 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'c':
-			count = atoi(optarg);
+			if (++i >= argc) {
+				fprintf(stderr, "Error: -c requires an argument\n");
+				exit(1);
+			}
+			count = atoi(argv[i]);
 			break;
 
 		case 't':
-			timeout = atoi(optarg);
+			if (++i >= argc) {
+				fprintf(stderr, "Error: -t requires an argument\n");
+				exit(1);
+			}
+			val = parse_positive_int(argv[i], "t");
+			if (val < 0) exit(1);
+			if (val == 0) {
+				fprintf(stderr, "Error: -t timeout must be > 0\n");
+				exit(1);
+			}
+			timeout = (int)val;
 			break;
 
 		case 's':
-			size = atoi(optarg);
+			if (++i >= argc) {
+				fprintf(stderr, "Error: -s requires an argument\n");
+				exit(1);
+			}
+			val = parse_positive_int(argv[i], "s");
+			if (val < 0) exit(1);
+			if (val == 0) {
+				fprintf(stderr, "Error: -s size must be > 0\n");
+				exit(1);
+			}
+			if (val > 65535) {
+				fprintf(stderr, "Error: -s size must be <= 65535\n");
+				exit(1);
+			}
+			size = (int)val;
 			break;
 
 #ifdef _OPENMP
@@ -555,18 +722,40 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'n':
-			threads = atoi(optarg);
+			if (++i >= argc) {
+				fprintf(stderr, "Error: -n requires an argument\n");
+				exit(1);
+			}
+			val = parse_positive_int(argv[i], "n");
+			if (val < 0) exit(1);
+			if (val == 0) {
+				fprintf(stderr, "Error: -n threads must be > 0\n");
+				exit(1);
+			}
+			threads = (int)val;
 			break;
 #endif
 
+		case 'h':
+			usage();
+			exit(0);
+
 		default:
+			fprintf(stderr, "Error: unknown option '-%c'\n\n", argv[i][1]);
 			usage();
 			exit(1);
 		}
 	}
 
-	if (!(argc - optind)) {
+	if (!target) {
+		fprintf(stderr, "Error: missing target BD_ADDR\n\n");
 		usage();
+		exit(1);
+	}
+
+	if (!valid_bdaddr(target)) {
+		fprintf(stderr, "Error: '%s' is not a valid BD_ADDR (expected XX:XX:XX:XX:XX:XX)\n",
+			target);
 		exit(1);
 	}
 
@@ -574,7 +763,7 @@ int main(int argc, char *argv[])
 	#pragma omp parallel num_threads(threads)
 #endif
 	{
-		ping(argv[optind]);
+		ping(target);
 	}
 
 	return 0;

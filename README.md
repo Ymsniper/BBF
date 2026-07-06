@@ -31,6 +31,32 @@ often faster since most candidates fail well before the timeout.
 > the NAP to complete a connection, so a wrong assumed NAP doesn't
 > prevent `l2ping` from reaching the device once the UAP is correct.
 
+## When you don't need BBF at all
+
+BBF exists to brute-force the UAP when you only have a partial address
+(the LAP) from passive Ubertooth sniffing. If the target device is
+**discoverable**, a standard inquiry scan already returns the full
+BD_ADDR and there is nothing left to brute-force:
+
+```bash
+# Standard scan gives you the full address directly:
+bluetoothctl scan on
+#   B3:C0:10:2D:B6:78   K07
+
+# Skip BBF entirely and go straight to l2flood:
+l2flood -R B3:C0:10:2D:B6:78
+```
+
+Most consumer Bluetooth devices (speakers, headphones, earbuds) are
+discoverable by default, or at minimum are discoverable during pairing
+and for some time afterward. Against these targets, the full workflow
+is just scan + l2flood. BBF + Ubertooth is only needed when the target
+is non-discoverable **and** you have no other way to obtain its address.
+
+If `bbf` is run with no arguments and no Ubertooth hardware is present,
+it now falls back to `hcitool scan` and lets you select a discoverable
+target directly, bypassing the UAP sweep entirely.
+
 ## Name resolution
 
 Any time `bbf` has a complete address (known UAP), whether that's a

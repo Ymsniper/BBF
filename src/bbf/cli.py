@@ -34,6 +34,65 @@ def _resolve_and_log(addr, args, source):
     return name
 
 
+def _fallback_hci_scan(args):
+    """ubertooth-rx not available -- offer hcitool scan as a fallback.
+    Unlike ubertooth (passive sniffing that finds non-discoverable devices),
+    hcitool scan only finds devices in discoverable mode, but it returns
+    full BD_ADDRs so no UAP brute-force is needed.
+
+    Returns a full BD_ADDR string if the user selects a device, or None."""
+    print("ubertooth-rx not found on PATH. Falling back to hcitool scan.")
+    print("(Note: hcitool scan only finds discoverable devices. For")
+    print(" non-discoverable targets, install ubertooth or provide the")
+    print(" LAP directly:  bbf AA:BB:CC)\n")
+
+    if shutil.which("hcitool") is None:
+        print("hcitool also not found on PATH (try: sudo apt install bluez).")
+        print(f"You can still run bbf with a known LAP:  bbf AA:BB:CC")
+        return None
+
+    print("Running: sudo hcitool scan\n")
+    try:
+        result = subprocess.run(
+            ["sudo", "hcitool", "scan"], capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        print("hcitool scan timed out.")
+        return None
+    except KeyboardInterrupt:
+        print("\nScan interrupted.")
+        return None
+
+    devices = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        # hcitool scan output: "XX:XX:XX:XX:XX:XX\tDevice Name"
+        parts = line.split("\t", 1)
+        if len(parts) >= 1 and len(parts[0]) == 17 and parts[0].count(":") == 5:
+            addr = parts[0]
+            name = parts[1] if len(parts) > 1 else "(unknown)"
+            devices.append((addr, name))
+
+    if not devices:
+        print("No discoverable devices found.")
+        print(f"Provide a known LAP directly:  bbf AA:BB:CC")
+        return None
+
+    print("Discoverable devices:\n")
+    for i, (addr, name) in enumerate(devices, 1):
+        print(f"  {i}) {addr}  {name}")
+
+    while True:
+        choice = input(f"\nSelect a target (1-{len(devices)}), or Enter to quit: ").strip()
+        if not choice:
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(devices):
+            addr, name = devices[int(choice) - 1]
+            print(f"\nSelected: {addr}  ({name})")
+            return addr
+        print("Invalid selection.")
+
+
 def _resolve_target_via_survey(args):
     """No LAP given on the CLI -- interactively survey for one. Mutates
     args.known_octets in place, or exits the process if the user bails.
@@ -44,8 +103,10 @@ def _resolve_target_via_survey(args):
     on to pick for brute-forcing -- they're already complete addresses
     modulo the assumed NAP, so there's no reason to wait."""
     if shutil.which("ubertooth-rx") is None:
-        sys.exit("No known_octets given and ubertooth-rx not found on PATH "
-                  "(try: sudo apt install ubertooth).")
+        addr = _fallback_hci_scan(args)
+        if addr is not None:
+            confirm_and_run(addr)
+        sys.exit(0)
     try:
         while True:
             timeout = args.scan_time if args.scan_time is not None else prompt_scan_timeout()

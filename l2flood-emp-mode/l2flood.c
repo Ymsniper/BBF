@@ -423,6 +423,8 @@ static void ping_emp(char *svr)
 	int sk = -1;
 	int i, printed = 0;
 	int reuse = 1;
+	int connect_fails = 0;
+	int last_err = 0;
 	struct linger ling = {1, 0};
 	struct sockaddr_l2 addr;
 
@@ -491,11 +493,29 @@ static void ping_emp(char *svr)
 						int err = 0;
 						socklen_t elen = sizeof(err);
 						getsockopt(sk, SOL_SOCKET, SO_ERROR, &err, &elen);
-						if (err != 0) { close(sk); sk = -1; usleep(2000); continue; }
+						if (err != 0) {
+							if (err != last_err || connect_fails % 50 == 0) {
+								fprintf(stderr, "EMP connect: %s (attempt %d)\n",
+									strerror(err), connect_fails + 1);
+								last_err = err;
+							}
+							connect_fails++;
+							close(sk); sk = -1; usleep(2000); continue;
+						}
 					} else {
+						connect_fails++;
+						if (connect_fails % 50 == 0)
+							fprintf(stderr, "EMP connect: poll timeout (attempt %d)\n",
+								connect_fails);
 						close(sk); sk = -1; usleep(2000); continue;
 					}
 				} else {
+					if (errno != last_err || connect_fails % 50 == 0) {
+						fprintf(stderr, "EMP connect: %s (attempt %d)\n",
+							strerror(errno), connect_fails + 1);
+						last_err = errno;
+					}
+					connect_fails++;
 					close(sk); sk = -1; usleep(2000); continue;
 				}
 			}
@@ -512,6 +532,13 @@ static void ping_emp(char *svr)
 			{
 				struct timeval snd_tv = {0, 300000}; /* 300ms */
 				setsockopt(sk, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
+			}
+
+			if (connect_fails > 0) {
+				printf("EMP reconnected after %d failed attempt(s)\n",
+					   connect_fails);
+				connect_fails = 0;
+				last_err = 0;
 			}
 
 			if (!printed) {
